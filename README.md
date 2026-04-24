@@ -106,13 +106,6 @@ All variables are optional. Defaults work for local development out of the box.
 npm run start:dev
 ```
 
-**Production mode:**
-
-```bash
-npm run build
-npm run start:prod
-```
-
 On startup you will see:
 
 ```
