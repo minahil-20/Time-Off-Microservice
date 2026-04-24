@@ -15,7 +15,7 @@ A **built-in mock HCM server** is included so the system works end-to-end with z
 - [Running the Application](#running-the-application)
 - [API Reference](#api-reference)
 - [Typical Usage Walkthrough](#typical-usage-walkthrough)
-- [Running Tests](#running-tests)
+- [Test Suite Overview](#test-suite-overview)
 - [Project Structure](#project-structure)
 - [Design Decisions](#design-decisions)
 
@@ -271,7 +271,50 @@ curl -s http://localhost:3000/time-off | jq
 
 ---
 
-## Running Tests
+## Test Suite Overview
+
+This project uses **Jest unit tests** with mocked dependencies to ensure full isolation of business logic and external systems.
+
+---
+
+## Test Coverage Breakdown
+
+### 1. Time-Off Service Tests (`time-off.service.spec.ts`)
+
+Covers the full request lifecycle:
+
+- Balance validation before request creation  
+- PENDING request persistence  
+- HCM approval success flow  
+- HCM rejection flow  
+- HCM failure (timeout/network error)  
+- Balance deduction on approval  
+- Retrieval APIs (`findAll`, `findOne`)  
+
+---
+
+### 2. Sync Service Tests (`sync.service.spec.ts`)
+
+Covers balance synchronization logic:
+
+- Upserting new balances  
+- Updating existing balances  
+- Batch processing logic  
+- Transaction safety  
+- Ensuring idempotency of sync operation  
+
+---
+
+### 3. HCM Service Tests (`hcm.service.spec.ts`)
+
+Covers external integration layer:
+
+- Successful HCM approval response  
+- HTTP failure handling (non-2xx responses)  
+- Network failure / timeout handling  
+- Proper error propagation  
+
+---
 
 **Run all tests:**
 ```bash
@@ -289,6 +332,7 @@ npx jest src/time-off/hcm.service.spec.ts
 ```
 
 ### Coverage Summary
+Below is test coverage summary for the above implemented tests:
 
 | File                   | Statements | Branches | Functions | Lines      |
 |------------------------|------------|----------|-----------|------------|
