@@ -1,104 +1,213 @@
-# Time-Off Microservice
+# Time-Off Service
 
-A production-grade NestJS microservice for managing employee time-off requests, backed by a local SQLite database and integrated with an external HCM system.
+A NestJS REST API that manages employee time-off requests with HCM (Human Capital Management) integration. The service handles the full approval lifecycle: balance validation → persisting a PENDING request → calling HCM for a decision → updating status and deducting balance on approval.
 
----
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                    Time-Off Microservice                      │
-│                                                              │
-│  POST /time-off          POST /sync/batch                    │
-│       │                        │                            │
-│  ┌────▼────────┐        ┌──────▼──────────┐                 │
-│  │ TimeOff     │        │  Sync           │                 │
-│  │ Module      │        │  Module         │                 │
-│  │             │        │                 │                 │
-│  │ - Check     │        │ - Upsert all    │                 │
-│  │   Balance   │        │   balances from │                 │
-│  │ - Save      │        │   HCM payload   │                 │
-│  │   PENDING   │        │   (overwrite)   │                 │
-│  │ - Call HCM  │        └─────────────────┘                 │
-│  │ - Update    │                                            │
-│  │   APPROVED/ │        ┌──────────────────┐               │
-│  │   REJECTED  │        │  Mock HCM        │               │
-│  └──────┬──────┘        │  /mock-hcm/      │               │
-│         │               │  approve         │               │
-│         │  HTTP POST    │  (15% errors,    │               │
-│         └──────────────►│   20% rejects)   │               │
-│                         └──────────────────┘               │
-│                                                              │
-│  ┌───────────────────────────────────────────┐              │
-│  │              SQLite (time_off.sqlite)     │              │
-│  │  ┌─────────────────┐  ┌────────────────┐ │              │
-│  │  │ time_off_       │  │   balances     │ │              │
-│  │  │ requests        │  │                │ │              │
-│  │  │ - id (uuid)     │  │ - id (uuid)    │ │              │
-│  │  │ - employee_id   │  │ - employee_id  │ │              │
-│  │  │ - location_id   │  │ - location_id  │ │              │
-│  │  │ - status        │  │ - remaining_   │ │              │
-│  │  │ - duration      │  │   days         │ │              │
-│  │  │ - hcm_reason    │  │ - last_synced_ │ │              │
-│  │  └─────────────────┘  │   at           │ │              │
-│  │                        └────────────────┘ │              │
-│  └───────────────────────────────────────────┘              │
-└──────────────────────────────────────────────────────────────┘
-```
+A **built-in mock HCM server** is included so the system works end-to-end with zero external dependencies.
 
 ---
 
-## Setup
+## Table of Contents
 
-### Prerequisites
-- Node.js ≥ 18
-- pnpm (`npm install -g pnpm`)
+- [Architecture Overview](#architecture-overview)
+- [Prerequisites](#prerequisites)
+- [Getting Started](#getting-started)
+- [Environment Variables](#environment-variables)
+- [Running the Application](#running-the-application)
+- [API Reference](#api-reference)
+- [Typical Usage Walkthrough](#typical-usage-walkthrough)
+- [Running Tests](#running-tests)
+- [Project Structure](#project-structure)
+- [Design Decisions](#design-decisions)
 
-### Install & Run
+---
+
+## Architecture Overview
+
+```
+Client
+  │
+  ├─ POST /time-off          → TimeOffController → TimeOffService
+  │                                                    ├─ Balance check (SQLite)
+  │                                                    ├─ Save PENDING (SQLite)
+  │                                                    └─ HcmService → POST /mock-hcm/approve
+  │                                                                          ↓
+  │                                                    Update APPROVED/REJECTED + deduct balance
+  │
+  ├─ POST /sync/batch        → SyncController → SyncService (upsert balances)
+  └─ GET  /sync/balances     → SyncController → SyncService (read balances)
+```
+
+- **Database:** SQLite (file-based, zero config — `time_off.sqlite` is auto-created on first run)
+- **Mock HCM:** Runs inside the same process on `/mock-hcm/approve`, simulating latency, errors, and rejections via env vars
+
+---
+
+## Prerequisites
+
+| Tool    | Version  |
+|---------|----------|
+| Node.js | >= 18.x  |
+| npm     | >= 9.x   |
+
+No database installation is required — SQLite is embedded via TypeORM.
+
+---
+
+## Getting Started
+
+**1. Clone the repository**
 
 ```bash
-# Install dependencies
-pnpm install
-
-# Development (hot reload)
-pnpm start:dev
-
-# Production
-pnpm build && pnpm start:prod
+git clone https://github.com/your-org/time-off-service.git
+cd time-off-service
 ```
 
-### Environment Variables
+**2. Install dependencies**
 
-| Variable | Default | Description |
-|---|---|---|
-| `PORT` | `3000` | HTTP port |
-| `HCM_BASE_URL` | `http://localhost:3000/mock-hcm` | External HCM base URL |
-| `HCM_ERROR_RATE` | `0.15` | Probability mock HCM throws 503 |
-| `HCM_REJECT_RATE` | `0.20` | Probability mock HCM rejects request |
-| `HCM_MIN_LATENCY` | `100` | Simulated latency floor (ms) |
-| `HCM_MAX_LATENCY` | `400` | Simulated latency ceiling (ms) |
+```bash
+npm install
+```
+
+**3. (Optional) Configure environment variables**
+
+The app runs with sensible defaults — no `.env` file is required to get started. To customise behaviour, create a `.env` file in the project root:
+
+```bash
+cp .env.example .env
+```
+
+See [Environment Variables](#environment-variables) for all available options.
+
+---
+
+## Environment Variables
+
+All variables are optional. Defaults work for local development out of the box.
+
+| Variable          | Description                                                              | Default                          |
+|-------------------|--------------------------------------------------------------------------|----------------------------------|
+| `PORT`            | Port the service listens on                                              | `3000`                           |
+| `HCM_BASE_URL`    | Base URL of the HCM approval endpoint                                    | `http://localhost:3000/mock-hcm` |
+| `NODE_ENV`        | Enables TypeORM SQL logging when set to `development`                    | _(unset)_                        |
+| `HCM_ERROR_RATE`  | Probability (0–1) that the mock HCM returns HTTP 503                     | `0.15`                           |
+| `HCM_REJECT_RATE` | Probability (0–1) that the mock HCM rejects an otherwise valid request   | `0.20`                           |
+| `HCM_MIN_LATENCY` | Minimum simulated HCM response latency in milliseconds                   | `100`                            |
+| `HCM_MAX_LATENCY` | Maximum simulated HCM response latency in milliseconds                   | `400`                            |
+
+> **Tip:** Set `HCM_ERROR_RATE=0` and `HCM_REJECT_RATE=0` for a fully deterministic happy-path during manual testing.
+
+---
+
+## Running the Application
+
+**Development mode** (hot reload via `ts-node-dev`):
+
+```bash
+npm run start:dev
+```
+
+**Production mode:**
+
+```bash
+npm run build
+npm run start:prod
+```
+
+On startup you will see:
+
+```
+🚀 Time-Off Service running on http://localhost:3000
+🔧 Mock HCM Service available at http://localhost:3000/mock-hcm
+```
+
+The SQLite database file `time_off.sqlite` is created automatically in the project root — no migrations needed.
 
 ---
 
 ## API Reference
 
-### 1. Seed Balances — `POST /sync/batch`
+### Time-Off Requests
 
-Must be called before submitting time-off requests.
+#### `POST /time-off`
+Submit a new time-off request. The service validates balance, saves the request, calls HCM for approval, and returns the final status.
 
-```bash
-curl -s -X POST http://localhost:3000/sync/batch \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "balances": [
-      { "employeeId": "emp-001", "locationId": "loc-nyc", "remainingDays": 15 },
-      { "employeeId": "emp-002", "locationId": "loc-lon", "remainingDays": 5 }
-    ]
-  }' | jq
+**Request body:**
+```json
+{
+  "employeeId": "emp-001",
+  "locationId": "loc-nyc",
+  "duration": 3
+}
 ```
 
-**Response `200`**
+| Field        | Type   | Description                                       |
+|--------------|--------|---------------------------------------------------|
+| `employeeId` | string | Employee identifier                               |
+| `locationId` | string | Location identifier (must match a synced balance) |
+| `duration`   | number | Requested days (positive number, e.g. `0.5` for half day) |
+
+**Response `201`:**
+```json
+{
+  "data": {
+    "id": "a1b2c3d4-...",
+    "employeeId": "emp-001",
+    "locationId": "loc-nyc",
+    "duration": 3,
+    "status": "APPROVED",
+    "hcmReason": "Approved by line manager via HCM workflow.",
+    "createdAt": "2026-04-24T10:00:00.000Z",
+    "updatedAt": "2026-04-24T10:00:01.000Z"
+  },
+  "message": "Time-off request is APPROVED."
+}
+```
+
+Possible `status` values: `PENDING` (HCM unreachable), `APPROVED`, `REJECTED`.
+
+---
+
+#### `GET /time-off`
+List all time-off requests, ordered by most recent first.
+
+**Response `200`:**
+```json
+{
+  "data": [ ...requests ],
+  "total": 5
+}
+```
+
+---
+
+#### `GET /time-off/:id`
+Get a single request by UUID.
+
+**Response `200`:**
+```json
+{
+  "data": { ...request }
+}
+```
+
+---
+
+### Balance Sync
+
+#### `POST /sync/batch`
+Seed or overwrite local balances from HCM data. **Must be called at least once before submitting any time-off requests.**
+
+**Request body:**
+```json
+{
+  "balances": [
+    { "employeeId": "emp-001", "locationId": "loc-nyc", "remainingDays": 15 },
+    { "employeeId": "emp-002", "locationId": "loc-lon", "remainingDays": 10 }
+  ]
+}
+```
+
+**Response `200`:**
 ```json
 {
   "message": "Sync complete. 2 balance(s) updated in 12ms.",
@@ -108,116 +217,140 @@ curl -s -X POST http://localhost:3000/sync/batch \
 
 ---
 
-### 2. Submit Time-Off Request — `POST /time-off`
+#### `GET /sync/balances`
+Inspect all current local balances.
 
-```bash
-curl -s -X POST http://localhost:3000/time-off \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "employeeId": "emp-001",
-    "locationId": "loc-nyc",
-    "duration": 3
-  }' | jq
-```
-
-**Response `201` — Approved**
+**Response `200`:**
 ```json
 {
-  "data": {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "employeeId": "emp-001",
-    "locationId": "loc-nyc",
-    "status": "APPROVED",
-    "duration": 3,
-    "hcmReason": "Approved by line manager via HCM workflow.",
-    "createdAt": "2024-01-15T10:30:00.000Z",
-    "updatedAt": "2024-01-15T10:30:00.500Z"
-  },
-  "message": "Time-off request is APPROVED."
-}
-```
-
-**Response `422` — Insufficient Balance**
-```json
-{
-  "statusCode": 422,
-  "error": ["Insufficient balance: requested 3 days but only 2 remaining."]
-}
-```
-
-**Response `404` — No Balance Record**
-```json
-{
-  "statusCode": 404,
-  "error": ["No balance record found for employee=emp-999 location=loc-nyc."]
+  "data": [
+    {
+      "id": "uuid",
+      "employeeId": "emp-001",
+      "locationId": "loc-nyc",
+      "remainingDays": 12,
+      "lastSyncedAt": "2026-04-24T10:00:00.000Z"
+    }
+  ],
+  "total": 1
 }
 ```
 
 ---
 
-### 3. List All Requests — `GET /time-off`
+### Mock HCM
 
+#### `POST /mock-hcm/approve`
+Internal endpoint used by `HcmService`. Called automatically — you do not need to invoke this directly. Simulates a real HCM system with configurable latency, error rate, and rejection rate (see [Environment Variables](#environment-variables)).
+
+---
+
+## Typical Usage Walkthrough
+
+Here is a complete end-to-end flow using `curl`:
+
+**Step 1 — Seed a balance**
+```bash
+curl -s -X POST http://localhost:3000/sync/batch \
+  -H "Content-Type: application/json" \
+  -d '{"balances":[{"employeeId":"emp-001","locationId":"loc-nyc","remainingDays":15}]}' \
+  | jq
+```
+
+**Step 2 — Submit a time-off request**
+```bash
+curl -s -X POST http://localhost:3000/time-off \
+  -H "Content-Type: application/json" \
+  -d '{"employeeId":"emp-001","locationId":"loc-nyc","duration":3}' \
+  | jq
+```
+
+**Step 3 — Check updated balance**
+```bash
+curl -s http://localhost:3000/sync/balances | jq
+```
+*(If approved, `remainingDays` will have decreased by 3.)*
+
+**Step 4 — List all requests**
 ```bash
 curl -s http://localhost:3000/time-off | jq
 ```
 
 ---
 
-### 4. Get Single Request — `GET /time-off/:id`
+## Running Tests
 
+**Run all tests:**
 ```bash
-curl -s http://localhost:3000/time-off/550e8400-e29b-41d4-a716-446655440000 | jq
+npm test
 ```
+
+**Run tests with coverage report:**
+```bash
+npm run test:cov
+```
+
+**Run a single test file:**
+```bash
+npx jest src/time-off/hcm.service.spec.ts
+```
+
+### Coverage Summary
+
+| File                   | Statements | Branches | Functions | Lines      |
+|------------------------|------------|----------|-----------|------------|
+| `sync.service.ts`      | 100%       | 100%     | 100%      | 100%       |
+| `hcm.service.ts`       | 100%       | 100%     | 100%      | 100%       |
+| `time-off.service.ts`  | 95.45%     | 100%     | 71.42%    | 95.12%     |
+| **All files**          | **98.18%** | **100%** | **85.71%**| **97.97%** |
+
+> **Note:** The `ERROR` log lines printed during test runs (e.g. `HCM responded with HTTP 500`, `Network error`) are **intentional** — they are produced by test cases that deliberately exercise the error-handling paths in `HcmService`. All 19 tests pass.
 
 ---
 
-### 5. Inspect Local Balances — `GET /sync/balances`
+## Project Structure
 
-```bash
-curl -s http://localhost:3000/sync/balances | jq
 ```
-
----
-
-## Testing
-
-```bash
-# Run all unit tests
-pnpm test
-
-# With coverage report
-pnpm test:cov
-```
-
-### Testing Scenarios
-
-```bash
-# ── Scenario 1: Insufficient balance ───────────────────────────────────────
-# Seed with 2 days, request 5 → expect 422
-curl -s -X POST http://localhost:3000/sync/batch \
-  -H 'Content-Type: application/json' \
-  -d '{"balances":[{"employeeId":"emp-low","locationId":"loc-nyc","remainingDays":2}]}'
-
-curl -s -X POST http://localhost:3000/time-off \
-  -H 'Content-Type: application/json' \
-  -d '{"employeeId":"emp-low","locationId":"loc-nyc","duration":5}'
-
-# ── Scenario 2: Force HCM errors (set error rate to 100%) ──────────────────
-HCM_ERROR_RATE=1.0 pnpm start:dev
-# All requests will stay PENDING
-
-# ── Scenario 3: Always reject ───────────────────────────────────────────────
-HCM_ERROR_RATE=0 HCM_REJECT_RATE=1.0 pnpm start:dev
+src/
+├── app.module.ts                        # Root module — wires TypeORM (SQLite) + feature modules
+├── main.ts                              # Bootstrap — global pipes, exception filter, port
+│
+├── common/
+│   └── filters/
+│       └── http-exception.filter.ts     # Consistent JSON error shape for all HTTP exceptions
+│
+├── hcm-mock/
+│   ├── hcm-mock.controller.ts           # Mock HCM server (POST /mock-hcm/approve)
+│   └── hcm-mock.module.ts
+│
+├── sync/
+│   ├── dto/
+│   │   └── batch-sync.dto.ts            # Validated DTO for POST /sync/batch
+│   ├── sync.controller.ts               # POST /sync/batch, GET /sync/balances
+│   ├── sync.module.ts
+│   ├── sync.service.ts                  # Transactional upsert of balance records
+│   └── sync.service.spec.ts
+│
+└── time-off/
+    ├── dto/
+    │   └── create-time-off.dto.ts       # Validated DTO for POST /time-off
+    ├── entities/
+    │   ├── balance.entity.ts            # Balance table (employeeId + locationId unique index)
+    │   └── time-off-request.entity.ts   # TimeOffRequest table (PENDING/APPROVED/REJECTED)
+    ├── Hcm.service.ts                   # Adapter — calls external HCM via fetch() with 5s timeout
+    ├── hcm.service.spec.ts
+    ├── time-off.controller.ts           # POST /time-off, GET /time-off, GET /time-off/:id
+    ├── time-off.module.ts
+    ├── time-off.service.ts              # Core business logic — full request lifecycle
+    └── time-off.service.spec.ts
 ```
 
 ---
 
 ## Design Decisions
 
-| Decision | Rationale |
-|---|---|
-| SQLite with TypeORM | Zero-dependency DB for local dev; swap `type: 'postgres'` for production |
-| Upsert in batch sync | Idempotent — calling `/sync/batch` twice is safe |
-| Atomic balance deduction | Raw `UPDATE remaining_days - N` prevents race conditions vs read-modify-write |
-| PENDING on HCM timeout | Enables a retry job (e.g. BullMQ) to reprocess without data loss |
-| Mock HCM in same process | No docker-compose needed for local dev; disabled in production via `HCM_BASE_URL` |
+- **SQLite over PostgreSQL** — zero-config embedded database makes the service trivially runnable with no infrastructure setup. The TypeORM abstraction means swapping to PostgreSQL or MySQL requires only a config change in `app.module.ts`.
+- **Built-in mock HCM** — the mock runs in-process so the service is fully self-contained. It simulates realistic behaviour (latency, 503s, policy rejections) and is fully tuneable via env vars.
+- **Transactional writes** — all DB mutations use `DataSource.transaction()` for atomicity. Balance deduction uses a raw `UPDATE ... SET remaining_days - N` to be safe against concurrent requests.
+- **Graceful HCM failure** — if HCM is unreachable the request is left as `PENDING` rather than failing, so a retry job can pick it up later without data loss.
+- **5-second HCM timeout** — `AbortSignal.timeout(5_000)` is applied to all HCM fetch calls to prevent indefinite hangs.
