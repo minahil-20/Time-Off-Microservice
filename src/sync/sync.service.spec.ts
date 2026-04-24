@@ -4,7 +4,9 @@ import { DataSource } from 'typeorm';
 import { SyncService } from './sync.service';
 import { Balance } from '../time-off/entities/balance.entity';
 
-const mockBalanceRepo = () => ({ find: jest.fn() });
+const mockBalanceRepo = () => ({
+  find: jest.fn(),
+});
 
 const mockEntityManager = {
   findOne: jest.fn(),
@@ -33,29 +35,89 @@ describe('SyncService', () => {
 
   afterEach(() => jest.clearAllMocks());
 
-  it('upserts all provided balances in a single transaction', async () => {
-    // Mock findOne to simulate existing record
-    mockEntityManager.findOne.mockResolvedValue({
-      employeeId: 'emp-001',
-      locationId: 'loc-nyc',
-      remainingDays: 10,
+  describe('batchSync', () => {
+    it('should insert new balance if not existing', async () => {
+      mockEntityManager.findOne.mockResolvedValue(null);
+
+      const dto = {
+        balances: [
+          { employeeId: 'emp-1', locationId: 'loc-1', remainingDays: 5 },
+        ],
+      };
+
+      const result = await service.batchSync(dto);
+
+      expect(mockEntityManager.create).toHaveBeenCalled();
+      expect(mockEntityManager.save).toHaveBeenCalledTimes(1);
+      expect(result.upserted).toBe(1);
     });
-    mockEntityManager.save.mockResolvedValue({});
 
-    const dto = {
-      balances: [
-        { employeeId: 'emp-001', locationId: 'loc-nyc', remainingDays: 15 },
-        { employeeId: 'emp-002', locationId: 'loc-lon', remainingDays: 10 },
-      ],
-    };
+    it('should update existing balance', async () => {
+      const existing = {
+        employeeId: 'emp-1',
+        locationId: 'loc-1',
+        remainingDays: 2,
+      };
 
-    const result = await service.batchSync(dto);
-    expect(result.upserted).toBe(2);
-    expect(mockEntityManager.save).toHaveBeenCalledTimes(2);
+      mockEntityManager.findOne.mockResolvedValue(existing);
+
+      const dto = {
+        balances: [
+          { employeeId: 'emp-1', locationId: 'loc-1', remainingDays: 10 },
+        ],
+      };
+
+      await service.batchSync(dto);
+
+      expect(existing.remainingDays).toBe(10);
+      expect(mockEntityManager.save).toHaveBeenCalledWith(existing);
+    });
+
+    it('should process multiple balances correctly', async () => {
+      mockEntityManager.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          employeeId: 'emp-2',
+          locationId: 'loc-2',
+          remainingDays: 1,
+        });
+
+      const dto = {
+        balances: [
+          { employeeId: 'emp-1', locationId: 'loc-1', remainingDays: 5 },
+          { employeeId: 'emp-2', locationId: 'loc-2', remainingDays: 8 },
+        ],
+      };
+
+      const result = await service.batchSync(dto);
+
+      expect(result.upserted).toBe(2);
+      expect(mockEntityManager.save).toHaveBeenCalledTimes(2);
+    });
+
+    it('should run inside a transaction', async () => {
+      const spy = jest.spyOn(mockDataSource, 'transaction');
+
+      await service.batchSync({ balances: [] });
+
+      expect(spy).toHaveBeenCalled();
+    });
+
+    it('should return zero for empty input', async () => {
+      const result = await service.batchSync({ balances: [] });
+
+      expect(result.upserted).toBe(0);
+    });
   });
 
-  it('returns zero upserted for an empty array', async () => {
-    const result = await service.batchSync({ balances: [] });
-    expect(result.upserted).toBe(0);
+  describe('getAllBalances', () => {
+    it('should return all balances', async () => {
+      const mockData = [{ employeeId: 'emp-1' }];
+      service['balanceRepo'].find = jest.fn().mockResolvedValue(mockData);
+
+      const result = await service.getAllBalances();
+
+      expect(result).toEqual(mockData);
+    });
   });
 });
