@@ -40,6 +40,8 @@ Client
 - **Database:** SQLite (file-based, zero config — `time_off.sqlite` is auto-created on first run)
 - **Mock HCM:** Runs inside the same process on `/mock-hcm/approve`, simulating latency, errors, and rejections via env vars
 
+> **Note:** For the full architectural breakdown and design decisions, please see the included TRD_TimeOff_Microservice.pdf.
+
 ---
 
 ## Prerequisites
